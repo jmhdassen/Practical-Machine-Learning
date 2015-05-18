@@ -1,0 +1,217 @@
+---
+title: "Weight Lift Exercise Quality Prediction"
+author: "Jozef M H Dassen"
+date: "Sunday, May 17, 2015"
+output: html_document
+---
+
+
+This is a Machine Learning project attempting to decide the proper way of weight lifting exercises from a set of body movement sensors.
+
+Data Set
+------------------------------------------------------------------
+
+The data set consists of processed sensor measurements. The processing was done using sliding windows on time series measurements of sensors. See http://groupware.les.inf.puc-rio.br/har (section on the Weight Lifting Exercise) for details.
+Each data row contains 152 measurements and is classified to a CLASS A,B,C,D or E indicating the quality of the exercise execution.
+Many of the columns however contain NA or DIV/0 values. These are removed. This will leave us with 52 usable measurements.
+No doubt some of these will be correlated since we use different sensor types for measuring the same movements.
+
+We calculate the correlation matrix for the 52 measurements and visualize it with corrplot.
+
+
+```{r, echo=FALSE, message=F, warning=F}
+library(caret)
+library(dplyr)
+library('corrplot') #package corrplot
+```
+
+```{r, echo=FALSE,fig.width=9, fig.height=9}
+library(caret)
+library(dplyr)
+library('corrplot') #package corrplot
+setwd("F:/Coursera/08_PracticalMachineLearning/Project")
+##setwd("/Users/dassen/Documents/Coursera/08_PracticalMachineLearning/Project")
+
+pml_training <- read.csv("pml-training.csv", na.strings=c("NA","#DIV/0!"))
+pml_testing <- read.csv("pml-testing.csv", na.strings=c("NA","#DIV/0!"))
+training<- pml_training[,colSums(is.na(pml_training)) < 100]
+inTrain <- createDataPartition(y=training$classe,p=0.7, list=FALSE)
+train    <- training[inTrain,-c(1,2,3,4,5,6,7)]
+crossval <- training[-inTrain,-c(1,2,3,4,5,6,7)]
+colNames <- names(train[-c(1,2,3,4,5,6,7)])
+corMatrix<- cor(train[,-53])
+
+corrplot(corMatrix, method = "circle") #plot matrix
+
+highCorr<-findCorrelation(corMatrix, cutoff=0.75)
+filtered_vars<-train[,-highCorr]
+
+##table(train$classe)
+nsv<-nearZeroVar(train, saveMetrics=TRUE)
+```
+
+We see correlations between x,y,z measurements of the same sensor, but also between different sensors on the same measuring point. We will use these correlations to attempt to reduce the number of predictors in the ML implementation. 
+
+We also have a look at the nearZero Variance of the data to see if there are any measurements that would not contribute much to the solution.
+
+
+```{r, echo=TRUE}
+nearZeroVar(train, saveMetrics=TRUE)
+
+```
+
+ It turns out that all the variables have sufficently large variation in measurement to be usable. 
+ 
+ 
+ We now look at which columns can be removed from the predictors based on the correlation matrix. We use the findCorrelation function with 75% as the cut off point. This means we find predictors that are more than 75% correlated with other predictors already in use.
+
+```{r, echo=TRUE}
+findCorrelation(corMatrix, cutoff=0.75)
+names(train[findCorrelation(corMatrix, cutoff=0.75)])
+
+```
+
+
+Model selection
+------------------------------------------------------------------
+
+The problem is a multi level classification problem. Linear or logistic regression is not suitable. A decison tree algorithm seems more suitable and we choose the random forest algorithm. Random forest is reputed to be robust and recommended as a first cut (see https://www.kaggle.com/wiki/RandomForests).
+
+The main issue we are facing that needs to be decided is which predictors to choose. We have total of 52 predictors but there are correlations between them as shown by the Correlation matrix. We will attempt to reduce the number of predictors. We will remove the highly correlated predictors found above from the predictors. But we will, as an alternative, also use PCA to reduce the predictors. To investigate the effect of the various methods we will run four models:  
+
+
+    1 Remove High Correlation       we remove the highly correlated predictors
+    2 PCA with threshold 0.80       we use PCA to find predictors keeping 80% of the variance.
+    3 PCA with threshold 0.95       we use PCA to find predictors keeping 95% of the variance.
+    4 Use all predictors            we use all 52 predictors
+
+We will evaluate accuracy and training time for each of the 4 cases.
+
+
+Cross Validation and Accuracy
+------------------------------------------------------------------
+
+In order to determine the Out of Sample error rate of the trained model we need to have a dataset independent of the training data. Therefore we split the original data set into a training data set and a cross validation data set as follows:
+
+```{r, echo=TRUE, eval=FALSE}
+inTrain <- createDataPartition(y=training$classe,p=0.7, list=FALSE)
+train    <- training[inTrain,]
+crossval <- training[-inTrain,]
+```
+
+We also notice that the range of values for the different predictors can be different by factor of up to 10,000. Therefore we preprocess each data row and scale to center the values (using mean and standard deviation). This preprocessing will be applied to both training and cross validation data sets (and later the test data set as well).
+
+The *train* dataset will be used for training the model and the *crossval* will be used for predicting outcome using the trained model.
+We then compare the predicted outcome with the actual outcome in a confusion matrix as follows:
+
+```{r, echo=TRUE, eval=FALSE}
+preProc <- preProcess(train[-lastCol], method = c("scale","center"))
+trainPC <- predict(preProc, train1[-lastCol])
+crossvalPC <- predict(preProc, crossval[-lastCol])
+modelFit <- train(train$classe ~ .,method="rf",data=trainPC)
+CM <- confusionMatrix(predict(modelFit,newdata=crossvalPC),crossval$classe)
+```
+
+The confusion matrix will give us the Accuracy of the prediction of the outcome on the cross validation data set by the model trained.
+
+
+As explained above we run 4 different models.
+Two of the models will use PCA, principle components as predictors. In those cases the preprocessing changes to:
+
+```{r, echo=TRUE, eval=FALSE}
+preProc <- preProcess(train[-lastCol], method = c("scale","center","pca"), thresh = 0.95)
+```
+
+Where *thresh* is the percentage of retained variance required.
+
+We give the full code for the first model, which removes the highly correlated predictors, below. The model and Confusion matrix output are shown.
+
+```{r, echo=TRUE, eval=FALSE}
+train1 <- train[,-highCorr]
+cv1 <- crossval[,-highCorr]
+lastCol <- dim(train1)[2]
+
+preProc1 <- preProcess(train1[-lastCol], method = c("scale","center"))
+trainPC1 <- predict(preProc1, train1[-lastCol])
+cvPC1 <- predict(preProc1, cv1[-lastCol])
+tic1=proc.time()[3]
+modelFit1 <- train(train1$classe ~ .,method="rf",data=trainPC1)
+toc1=proc.time()[3] - tic1
+CM1 <- confusionMatrix(predict(modelFit1,newdata=cvPC1),cv1$classe)
+modelFit1
+CM1
+
+```
+
+```{r, echo=FALSE, eval=TRUE, message=F, warning=F}
+set.seed(177254)
+train1 <- train[,-highCorr]
+cv1 <- crossval[,-highCorr]
+lastCol <- dim(train1)[2]
+
+preProc1 <- preProcess(train1[-lastCol], method = c("scale","center"))
+trainPC1 <- predict(preProc1, train1[-lastCol])
+cvPC1 <- predict(preProc1, cv1[-lastCol])
+tic1=proc.time()[3]
+##modelFit1 <- train(train1$classe ~ .,method="rf",data=trainPC1)
+setwd("F:/Coursera/08_PracticalMachineLearning/Project")
+load("modelFit1.RData")
+
+toc1=proc.time()[3] - tic1
+CM1 <- confusionMatrix(predict(modelFit1,newdata=cvPC1),cv1$classe)
+modelFit1
+CM1
+
+```
+
+We see that the model uses 31 predictors and the resulting Accuracy is 0.99. We timed the execution using tic/toc variables and find that this model need 2205 seconds to train.
+
+
+As explained we train 3 additional models, two using PCA and one with the full set of predictors. The result is shown in the table below.
+
+| Case                       | Predictors | Accuracy | Elapsed Time |   
+|----------------------------|------------|----------|--------------|
+| Remove High Correlation    | 31         | .99      | 2204.7       |  
+| PCA with threshold 0.80    | 12         | .96      | 1082.2       |   
+| PCA with threshold 0.95    | 25         | .98      | 1967.8       |  
+| Use all predictors         | 52         | .99      | 3446.8       |   
+
+It appears that removing the highly correlated predictors gives the same accuracy as using all predictors. Execution time improves by 36%, which roughly corresponds to the reduction in the number of predictors (40%).
+The Accuracy of the PCA runs depends on the threshold requested. A threshold value of 95% gives good accuracy but not as good as the models with high correlation predictors removed.
+The model with high correlation predictors removed seems to be the best compromise. We get a good reduction in computation time without losing accuracy.
+
+
+Prediction of Test cases
+------------------------------------------------------------------
+
+We will now proceed to predict the outcome of the test data set using the trained models.
+The test data set needs to be prepared by applying the same preprocessing as was used in the training.  We need to take care obviously to apply the correct preprocessing (since we have 4 models). We show the case for our preferred model, the High-Correlation-Removed model:
+
+```{r, echo=TRUE, eval=FALSE}
+test    <- testing[,-highCorr]
+lastCol <- dim(train)[2]
+testPC  <- predict(preProc, test[-lastCol])
+predict <- predict(modelFit, newdata=testPC)
+```
+
+Applying the same process for each of the other 3 models, we get the predictions as shown in the table below. Only the model with PCA at threshold 80% shows different predictions for test sample 3 and 11.
+
+```{r, echo=FALSE}
+setwd("F:/Coursera/08_PracticalMachineLearning/Project")
+load("predict1.RData")
+load("predict2.RData")
+load("predict3.RData")
+load("predict4.RData")
+##predict1
+predictions<-bind_cols(as.data.frame(predict1),as.data.frame(predict2),as.data.frame(predict3),as.data.frame(predict4))
+names(predictions)<- c("Remove High Corr.","PCA threshold 0.80","PCA threshold 0.95","All predictors")
+print(predictions)
+```
+
+Conclusion
+---------------------------------------------------------------
+
+Random forest is an easy ML model to use in the given case. Training time is the only issue to be addressed by attempting to reduce the number of predictors used in the model. Simply removing highly correlated predictors is as effective, if not more so, than using PCA with high variance retention. The trained model works well on the cross validation set.
+
+
+
